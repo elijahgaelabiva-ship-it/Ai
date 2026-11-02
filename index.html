@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>BLIP</title>
+<style>
+  :root{color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+  html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px);background:#000}
+  body{margin:0;height:100%;background:#000;overflow:hidden;overscroll-behavior:none;color:#cfe6ff;
+       font:13px system-ui,sans-serif;-webkit-tap-highlight-color:transparent;-webkit-user-select:none;user-select:none}
+  #stage{position:fixed;inset:0;touch-action:none}
+  #stage svg{width:100%;height:100%;display:block}
+  #gear{position:fixed;right:10px;top:calc(env(safe-area-inset-top,0px) + 10px);width:44px;height:44px;border-radius:50%;
+        border:0;background:#111a;color:#9bd;font-size:22px;opacity:.3;z-index:3}
+  #panel{position:fixed;left:0;right:0;bottom:0;max-height:60%;overflow-y:auto;touch-action:pan-y;z-index:2;
+         background:#0a1017f2;padding:10px 12px calc(env(safe-area-inset-bottom,0px) + 14px);box-sizing:border-box;
+         transform:translateY(105%);transition:transform .22s ease-out}
+  #panel.on{transform:none}
+  .row{display:flex;align-items:center;gap:8px;margin:2px 0}
+  .row label{flex:0 0 112px;font-size:12px;color:#9ab}
+  .row input[type=range]{flex:1;min-width:0}
+  .row output{flex:0 0 38px;text-align:right;font-variant-numeric:tabular-nums;color:#6cf}
+  .btns{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:6px 0 10px}
+  .btns button,.tools button{background:#16212c;color:#cfe6ff;border:1px solid #2a3a4a;border-radius:8px;padding:9px 2px;font-size:12px}
+  .btns button.cur{border-color:#4fd8ff;color:#4fd8ff}
+  .tools{display:flex;gap:6px;align-items:center;margin-bottom:8px}
+  .tools button{flex:1}
+  #say{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 96px);text-align:center;font-size:20px;
+       color:#8fdcff;text-shadow:0 0 12px #2bd;opacity:0;transition:opacity .45s;pointer-events:none;z-index:1;padding:0 20px}
+  .bar{flex:1;height:8px;background:#16212c;border-radius:4px;overflow:hidden}
+  .bar i{display:block;height:100%;background:#4fd8ff;transform-origin:left;transform:scaleX(0)}
+  .mood{color:#6cf;margin:2px 0 8px;font-size:12px;line-height:1.4}
+  #mic,#kb{position:fixed;bottom:calc(env(safe-area-inset-bottom,0px) + 18px);width:56px;height:56px;border-radius:50%;z-index:3;
+           border:2px solid #2a3a4a;background:#0c141bcc;color:#8fdcff;font-size:24px;opacity:.55}
+  #mic{left:50%;margin-left:-28px} #kb{left:calc(50% - 100px);width:44px;height:44px;margin-top:6px;font-size:20px}
+  #mic.on{border-color:#4fd8ff;opacity:1;box-shadow:0 0 18px #4fd8ff88}
+  #txtRow{position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 84px);display:none;padding:0 14px;z-index:3}
+  #txtRow.on{display:block}
+  #txt,.row input[type=text],.row input[type=password]{width:100%;box-sizing:border-box;background:#16212c;color:#cfe6ff;
+       border:1px solid #2a3a4a;border-radius:8px;padding:9px;font-size:15px;-webkit-user-select:text;user-select:text;flex:1;min-width:0}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="say"></div>
+<button id="gear" aria-label="Debug panel">⚙</button>
+<div id="panel"></div>
+
+<script>
+(() => {
+'use strict';
+
+/* ================================================================
+   1. PARAMETERS – the whole look is just these numbers.
+   Eyes are plain circles (like the LOOI reference); emotions come
+   from the size, the lids (top slant/droop, bottom squint/cheek),
+   colour and gaze – no special glyph shapes.
+   ================================================================ */
+const PARAMS = [
+  {id:'open',   label:'openness',            min:0,   max:1.3, def:1},
+  {id:'slant',  label:'lid slant (+angry)',  min:-1,  max:1,   def:0},
+  {id:'droop',  label:'lid droop',           min:0,   max:1,   def:0},
+  {id:'squint', label:'squint (bottom lid)', min:0,   max:1,   def:0},
+  {id:'cheek',  label:'cheek curve (happy)', min:0,   max:1,   def:0},
+  {id:'w',      label:'eye width',           min:50,  max:230, def:105},
+  {id:'h',      label:'eye height',          min:50,  max:270, def:165},
+  {id:'round',  label:'roundness',           min:0,   max:1,   def:1},
+  {id:'gx',     label:'gaze x',              min:-1,  max:1,   def:0},
+  {id:'gy',     label:'gaze y',              min:-1,  max:1,   def:0},
+  {id:'hue',    label:'colour (hue)',        min:0,   max:360, def:195, z:1},
+  {id:'glow',   label:'glow intensity',      min:0,   max:1.5, def:.7, z:1},
+  {id:'bounce', label:'bounce (laugh)',      min:0,   max:1,   def:0, z:1},
+];
+const DEF = {}; PARAMS.forEach(p => DEF[p.id] = p.def);
+
+/* Emotions = sparse presets layered over the defaults. */
+const PRESETS = {
+  neutral:   {},
+  happy:     {squint:.4, cheek:1, glow:.9},
+  sad:       {slant:-.85, droop:.3, gy:.3, hue:210, glow:.5},
+  angry:     {slant:.95, droop:.25, squint:.1, hue:2, glow:.9},
+  sleepy:    {droop:.6, glow:.4, gy:.2},
+  bored:     {droop:.5, glow:.45, gx:-.5, gy:.1},
+  asleep:    {open:.06, glow:.2, hue:215},
+  surprised: {glow:1},
+  curious:   {hue:175},
+  shy:       {squint:.3, cheek:.6, gx:-.6, gy:.4, glow:.6},
+  laugh:     {squint:.4, cheek:1, bounce:1, glow:1},
+  pet:       {squint:.4, cheek:1, glow:.9, hue:170},
+  love:      {squint:.35, cheek:1, glow:1.1, hue:335},
+  dizzy:     {squint:.3, cheek:.4, slant:.2, hue:285, glow:.9},
+  yawn:      {squint:.5, cheek:.4, glow:.5},
+  sulk:      {slant:.6, droop:.35, squint:.05, gx:-.4, gy:.2, hue:235, glow:.55},
+};
+const fullPreset = name => Object.assign({}, DEF, PRESETS[name]);
+
+/* ================================================================
+   2. STATE
+   ================================================================ */
+const cur = Object.assign({}, DEF, {open:0});   // starts closed, wakes up
+const vel = {}; PARAMS.forEach(p => vel[p.id] = 0);
+let base = fullPreset('neutral');
+let over = null, overUntil = 0;     // temporary touch reaction on top of base
+let life = true, currentName = 'neutral';
+let talkAmt = 0, talkTarget = 0, tiltX = 0;     // Stage 3: eyes pulse while BLIP talks
+const clamp = (v,a,b) => Math.min(b, Math.max(a,v));
+const rnd = (a,b) => a + Math.random()*(b-a);
+
+/* ================================================================
+   3. SVG – two circles-with-lids on black. Everything is drawn in
+   left-eye space; the right eye is mirrored (inner side = +x).
+   ================================================================ */
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent){
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+const svg = el('svg', {viewBox:'0 0 800 400', preserveAspectRatio:'xMidYMid meet'}, document.getElementById('stage'));
+const defs = el('defs', {}, svg);
+// Flat cyan with a darker rim, like the reference photos
+const bodyGrad = el('radialGradient', {id:'bd', cx:'.45', cy:'.38', r:'.75'}, defs);
+const bodyStops = [0,.6,1].map(o => el('stop', {offset:o}, bodyGrad));
+const glowGrad = el('radialGradient', {id:'gl'}, defs);
+const glowStops = [0,1].map(o => el('stop', {offset:o}, glowGrad));
+
+function makeEye(cx, mirror, id){
+  const pos  = el('g', {}, svg);                             // gaze position
+  const glow = el('circle', {r:170, fill:'url(#gl)'}, pos);  // soft halo (no blur filter = fast)
+  const m    = el('g', {}, pos);                             // mirror + breathing + blink
+  const clip = el('clipPath', {id:'clip'+id}, defs);
+  const lid  = el('path', {}, clip);                         // lid shape, rebuilt each frame
+  const body = el('g', {'clip-path':'url(#clip'+id+')'}, m);
+  const rect = el('rect', {fill:'url(#bd)'}, body);
+  return {cx, mirror, pos, glow, m, lid, rect};
+}
+const eyes = [makeEye(240, 1, 'L'), makeEye(560, -1, 'R')];
+
+/* ================================================================
+   4. SPRINGS – critically-damped-ish: smooth blend, tiny overshoot,
+   no wobble. (Gaze is fully critically damped so it never shakes.)
+   ================================================================ */
+let gaze = {k:300, z:1};
+let wx = 0, wy = 0, fingerGaze = false;
+
+function step(dt, t, now){
+  const T = (over && now < overUntil) ? over : (over = null, base);
+  const amp = fingerGaze ? 1 : (1 - T.droop*.4) * (T.open < .2 ? 0 : 1);
+  for (const p of PARAMS){
+    let tg = T[p.id], k = 130, z = p.z || .6;
+    if (p.id === 'open' && life) tg += .012*Math.sin(t*.8);   // barely-there life in the lids
+    if (p.id === 'gx' || p.id === 'gy'){
+      const off = p.id === 'gx' ? wx : wy;
+      tg = clamp(fingerGaze ? off : T[p.id] + off*amp, -1, 1);
+      k = gaze.k; z = gaze.z;
+    }
+    const c = 2*z*Math.sqrt(k);
+    vel[p.id] += (k*(tg - cur[p.id]) - c*vel[p.id]) * dt;
+    cur[p.id] += vel[p.id] * dt;
+  }
+}
+
+/* ================================================================
+   5. MICRO-LIFE – blinks (sometimes double), saccades, corner
+   glances, slow look-arounds
+   ================================================================ */
+let blinkMul = 1, blink = 0, blinkStart = -1, doubleLeft = 0, nextBlink = 1.5;
+let nextGaze = 0, gazeQueue = [], lastInput = 0;
+
+function updateBlink(t){
+  if (!life) { blink = 0; return; }
+  if (blinkStart < 0 && t >= nextBlink){ blinkStart = t; doubleLeft = Math.random() < .22 ? 1 : 0; }
+  if (blinkStart >= 0){
+    const p = (t - blinkStart) / .17;
+    blink = p < 0 ? 0 : Math.sin(Math.PI*Math.min(p,1));
+    if (p >= 1){
+      if (doubleLeft-- > 0) blinkStart = t + .08;
+      else { blinkStart = -1; blink = 0; nextBlink = t + rnd(2.2, 6.5) * blinkMul; }
+    }
+  }
+}
+function randomGaze(t){
+  const r = Math.random(), idleFor = t - lastInput;
+  if (r < .20) return {x:wx+rnd(-.12,.12), y:wy+rnd(-.1,.1), hold:rnd(.3,.7), k:700, z:1};   // micro saccade
+  if (r < .68) return {x:rnd(-.55,.55), y:rnd(-.35,.35), hold:rnd(.9,2.6), k:420, z:1};      // quick look
+  if (r < .80) {                                                                            // corner glance, then back
+    gazeQueue.push({x:rnd(-.2,.2), y:0, hold:rnd(.9,1.6), k:300, z:1});
+    return {x:(Math.random()<.5?-1:1)*.9, y:rnd(-.7,.7), hold:rnd(.6,1), k:520, z:1};
+  }
+  if (r < .92 && idleFor > 6) {                                                             // slow look-around
+    gazeQueue.push({x:.85, y:-.15, hold:1.6, k:22, z:1}, {x:-.2, y:.15, hold:1.2, k:30, z:1});
+    return {x:-.85, y:-.1, hold:1.8, k:22, z:1};
+  }
+  return {x:rnd(-.35,.35), y:rnd(-.25,.25), hold:rnd(1,2), k:120, z:1};                     // lazy drift
+}
+function updateGaze(t){
+  if (!life || fingerGaze || t < nextGaze) return;
+  const a = gazeQueue.length ? gazeQueue.shift() : randomGaze(t);
+  wx = a.x; wy = a.y; gaze = {k:a.k, z:a.z}; nextGaze = t + a.hold;
+}
+
+/* ================================================================
+   6. RENDER
+   ================================================================ */
+let lastHue = -99;
+function render(t){
+  const c = cur;
+  const hue = ((c.hue % 360) + 360) % 360;
+  if (Math.abs(hue - lastHue) > .3){
+    lastHue = hue;
+    ['66','56','40'].forEach((l,i) => bodyStops[i].setAttribute('stop-color', `hsl(${hue} 95% ${l}%)`));
+    glowStops[0].setAttribute('stop-color', `hsla(${hue},100%,55%,.35)`);
+    glowStops[1].setAttribute('stop-color', `hsla(${hue},100%,55%,0)`);
+  }
+  const gI = clamp(c.glow, 0, 1.5);
+  const W = Math.max(8, c.w), H = Math.max(.5, c.h * clamp(c.open, 0, 1));            // openness only closes the eye, never enlarges it
+  talkAmt += (talkTarget - talkAmt) * .15;
+  const pulse = talkAmt * (.5 + .5*Math.sin(t*13)*Math.sin(t*4.1 + 1));   // irregular, speech-like beat
+  const br = 1 + .012*Math.sin(t*1.6) + pulse*.035;                 // slow breathing (very small)
+  const sy = 1 - .96*blink;                            // blink squash
+  const bob = c.bounce * Math.sin(t*14) * 5;           // only used while laughing
+
+  for (const e of eyes){
+    e.pos.setAttribute('transform', `translate(${(e.cx + (c.gx + tiltX*.55)*34).toFixed(2)} ${(200 + c.gy*22 + bob).toFixed(2)})`);
+    e.m.setAttribute('transform', `scale(${(e.mirror*br).toFixed(4)} ${(br*sy).toFixed(4)})`);
+    e.glow.setAttribute('opacity', clamp(gI + pulse*.35, 0, 1).toFixed(3));
+
+    e.rect.setAttribute('x', -W/2); e.rect.setAttribute('y', -H/2);
+    e.rect.setAttribute('width', W); e.rect.setAttribute('height', H);
+    e.rect.setAttribute('rx', (W/2).toFixed(1)); e.rect.setAttribute('ry', Math.min(H/2, H*.4 + (1 - clamp(c.round,0,1))*0).toFixed(1));   // fixed oval
+
+    // Lids. Top: droop + slant (slant>0 lowers inner corner = angry, <0 lowers outer = sad).
+    // Bottom: squint raises it, cheek curves it upward in the middle (happy).
+    const s = clamp(c.slant,-1,1), dr = clamp(c.droop,0,1)*H*.62;
+    const yo = -H/2 + dr + Math.max(0,-s)*H*.62, yi = -H/2 + dr + Math.max(0,s)*H*.62;
+    const yb = H/2 - clamp(c.squint,0,1)*H*.55, d = clamp(c.cheek,0,1)*H*.55;
+    const X = W/2 + 30, slope = (yi - yo) / W;
+    const top = x => Math.min(yo + slope*(x + W/2), yb - d);
+    e.lid.setAttribute('d', `M${-X} ${top(-X)} L${X} ${top(X)} L${X} ${yb} Q0 ${yb - 2*d} ${-X} ${yb} Z`);
+  }
+}
+
+/* ================================================================
+   7. TOUCH – tap = look at finger, hold top = pet, wiggle = tickle
+   ================================================================ */
+const stage = document.getElementById('stage');
+let touch = null;
+function setOver(name, ms){ over = fullPreset(name); overUntil = performance.now() + ms; }
+function lookAtFinger(x, y){
+  fingerGaze = true; gaze = {k:260, z:1};
+  wx = clamp((x / innerWidth - .5) * 2.4, -1, 1);
+  wy = clamp((y / innerHeight - .5) * 2.4, -1, 1);
+}
+stage.addEventListener('contextmenu', e => e.preventDefault());
+stage.addEventListener('pointerdown', e => {
+  stage.setPointerCapture(e.pointerId);
+  touch = {sx:e.clientX, sy:e.clientY, lx:e.clientX, sg:0, revs:[], moved:0, t0:performance.now(),
+           top:e.clientY < innerHeight*.38, pet:false};
+  lastInput = performance.now()/1000;
+  ENGINE.touch();
+  lookAtFinger(e.clientX, e.clientY);
+  if (!document.fullscreenElement && document.documentElement.requestFullscreen)
+    document.documentElement.requestFullscreen().catch(()=>{});
+});
+stage.addEventListener('pointermove', e => {
+  if (!touch) return;
+  const now = performance.now();
+  lastInput = now/1000;
+  lookAtFinger(e.clientX, e.clientY);
+  touch.moved = Math.max(touch.moved, Math.hypot(e.clientX - touch.sx, e.clientY - touch.sy));
+  const dx = e.clientX - touch.lx;                     // count left/right direction flips
+  if (Math.abs(dx) > 5){
+    const s = Math.sign(dx);
+    if (touch.sg && s !== touch.sg) touch.revs.push(now);
+    touch.sg = s; touch.lx = e.clientX;
+  }
+  touch.revs = touch.revs.filter(r => now - r < 900);
+  if (touch.revs.length >= 4){ touch.pet = false; setOver('laugh', 700); ENGINE.event('tickle'); }   // tickle
+});
+function endTouch(){
+  if (!touch) return;
+  const now = performance.now();
+  if (touch.pet) overUntil = now + 900;
+  else if (now - touch.t0 < 350 && touch.moved < 25){ setOver('curious', 900); ENGINE.event('tap'); }
+  touch = null; fingerGaze = false; nextGaze = now/1000 + 1;
+}
+stage.addEventListener('pointerup', endTouch);
+stage.addEventListener('pointercancel', endTouch);
+function updateTouch(now){
+  if (touch && !touch.pet && touch.top && touch.moved < 50 && now - touch.t0 > 450) touch.pet = true;
+  if (touch && touch.pet){ over = fullPreset('pet'); overUntil = Infinity; }
+}
+
+/* ================================================================
+   8. EMOTION ENGINE (Stage 2) – BLIP's inner life.
+   Stats drift on their own, events push them, and the stats blend
+   the eye presets continuously. It also acts on its own (director).
+   ================================================================ */
+const ENGINE = (() => {
+  const KEY = 'blip.state.v2';
+  const STATS = ['energy','happiness','affection','loneliness','boredom','curiosity','anxiety'];
+  const PERSONALITY = {playful:.8, shy:.5, loyal:.9};
+  /* Tuning knobs (1 = default). Editable live in the debug panel and saved. */
+  const TUNE_KEY = 'blip.tune.v4';
+  const TUNE0 = {lonely:1, bored:1, curious:1, events:1, expr:1, chatty:1, energyOff:0}, P0 = Object.assign({}, PERSONALITY);
+  const TUNE = Object.assign({}, TUNE0);
+  try { const t = JSON.parse(localStorage.getItem(TUNE_KEY)); if (t){ Object.assign(TUNE, t.tune); Object.assign(PERSONALITY, t.pers); } } catch(e){}
+  const cdv = (a, b) => (a + Math.random()*(b - a)) / TUNE.chatty;     // behaviour cool-down, shorter when chattier          // fixed character (0..1)
+  const BOND_NAMES = ['stranger','acquaintance','friend','close friend','best friend','soulmate'];
+  const BOND_AT = [0,20,40,60,80,92];
+  const WORDS = {sad:'lonely/droopy', happy:'happy', sleepy:'sleepy', bored:'bored', curious:'curious',
+                 shy:'nervous', sulk:'sulky', asleep:'asleep'};
+  const sayEl = document.getElementById('say');
+  const pick = a => a[Math.random()*a.length | 0];
+  const u = (v, lo, hi) => clamp((v-lo)/(hi-lo), 0, 1);       // 0..1 ramp
+
+  const fresh = () => ({energy:70, happiness:60, affection:40, loneliness:20, boredom:30, curiosity:55,
+                        anxiety:25, sulk:0, bond:30, idle:0, petSec:0, chatStreak:0, lastSeen:Date.now(), log:[]});
+  let S = fresh(), auto = true, autoBox = null, tscale = 1, hourMode = 0;
+  let busy = false, simT = 0, sleeping = false, sayT = 0, lastTickle = 0, weights = {};
+  let acc = 0, wAcc = 0, saveAcc = 0, uiAcc = 0, refreshUI = () => {};
+  const cd = {yawn:0, play:0, ask:0, call:0};                   // behaviour cool-downs (sim seconds)
+
+  const hour = () => hourMode === 1 ? 2 : hourMode === 2 ? 14 : new Date().getHours();
+  const timeEnergy = () => { const h = hour(); return (h >= 23 || h < 6) ? 10 : h < 9 ? 55 : h < 20 ? 75 : 50; };
+  const bump = fx => { for (const k in fx) S[k] = clamp(S[k] + fx[k], 0, 100); };
+  const log = what => { if (S.log[0] && S.log[0].what === what) return; S.log.unshift({t:Date.now(), what}); S.log.length = Math.min(S.log.length, 8); };
+  const fmt = s => s >= 5400 ? Math.round(s/3600) + 'h' : Math.round(s/60) + ' min';
+  function say(text, ms, quiet){
+    if (!quiet && ENGINE.onSay) ENGINE.onSay(text);      // lets the voice read its own spontaneous lines
+    sayEl.textContent = text; sayEl.style.opacity = 1;
+    clearTimeout(sayT); sayT = setTimeout(() => sayEl.style.opacity = 0, ms || 2500);
+  }
+
+  /* Where each stat settles when nothing happens: personality + bond + time of day */
+  function baseline(){
+    const P = PERSONALITY, b = S.bond;
+    return {energy:clamp(timeEnergy() + TUNE.energyOff, 0, 100), happiness:50 + b*.2 + P.loyal*5, affection:30 + b*.5,
+            loneliness:15 + P.loyal*10, boredom:25 + P.playful*15, curiosity:45 + P.playful*20,
+            anxiety:15 + P.shy*25 - b*.15};
+  }
+
+  /* One-shot events. fx = stat changes, bond = trust change */
+  const FX = {
+    tap:    {fx:{boredom:-3, loneliness:-4, curiosity:1, happiness:1}, bond:.05},
+    tickle: {fx:{happiness:4, energy:-1.5, boredom:-6, loneliness:-3, affection:1}, bond:.2, log:'tickled me'},
+    praise: {fx:{happiness:14, affection:5, anxiety:-6, sulk:-30, loneliness:-8}, bond:1.2, log:'praised me',
+             say:['hehe… really?','*glows*'], over:'happy'},
+    scold:  {fx:{happiness:-16, anxiety:16*(1 + PERSONALITY.shy*.5), affection:-4, sulk:45, loneliness:4}, bond:-3.5,
+             log:'scolded me', say:['…ok.','*looks away*'], over:'sulk'},
+    sad:    {fx:{happiness:-10, anxiety:6, affection:3}, bond:.4, log:'told me something sad',
+             say:["oh no… I'm here."], over:'sad'},
+    chat:   {fx:{energy:-2.2, boredom:-8, curiosity:-3, loneliness:-6, happiness:1.5}, bond:.15, log:'talked with me'},
+  };
+  function event(name, quiet){      // quiet = the AI reply already supplies words + face
+    const e = FX[name]; if (!e) return;
+    if (name === 'tickle'){ if (performance.now() - lastTickle < 1500) return; lastTickle = performance.now(); }
+    touch();
+    { const f = {}; for (const k in e.fx) f[k] = e.fx[k]*TUNE.events; bump(f); } S.bond = clamp(S.bond + e.bond, 0, 100);
+    if (name === 'chat'){ S.chatStreak++; bump({energy:-S.chatStreak*.15}); }   // long chats tire it out
+    else if (name !== 'tap' && name !== 'tickle') S.chatStreak = 0;
+    if (e.sulkOnly) return;
+    if (e.log) log(e.log);
+    if (quiet) return;
+    if (e.say) say(pick(e.say), 2200);
+    if (e.over) setOver(e.over, 2200);
+  }
+
+  /* The AI's emotion tag nudges the stats (it never sets the face directly) */
+  const NUDGE = {happy:{happiness:9}, love:{affection:6, happiness:6, loneliness:-3}, sad:{happiness:-7, loneliness:3},
+    angry:{sulk:25, happiness:-5}, scared:{anxiety:12}, embarrassed:{anxiety:4, happiness:2},
+    playful:{boredom:-10, happiness:4, energy:2}, curious:{curiosity:8}, sleepy:{energy:-8}, surprised:{curiosity:3, anxiety:2}};
+  function nudge(emo, k){
+    const n = NUDGE[emo], fx = {}; if (!n) return;
+    for (const key in n) fx[key] = n[key] * k;
+    bump(fx);
+  }
+
+  /* Any contact: wakes it, and a long absence triggers a greeting */
+  function touch(){
+    const away = S.idle; S.idle = 0;
+    if (sleeping){ sleeping = false; bump({energy:6}); setOver('surprised', 500); say('…mm? I was sleeping!', 2500); return; }
+    if (away > 600) arrive(away);
+  }
+  /* While you were gone: stats move without simulating every second */
+  function applyAway(s){
+    s = Math.min(s, 48*3600); const h = s/3600, P = PERSONALITY;
+    S.energy += (timeEnergy() - S.energy) * (1 - Math.exp(-s/2400));
+    bump({loneliness:Math.min(80, h*10), boredom:Math.min(60, h*12), curiosity:Math.min(40, h*8),
+          happiness:-Math.min(40, h*5), anxiety:Math.min(25, h*3*(1 - P.loyal*.4)), affection:-Math.min(15, h*.8*(1 - P.loyal*.7))});
+    S.bond = clamp(S.bond - Math.min(6, Math.max(0, h-12)*.2), 0, 100);
+    S.idle = s;
+  }
+  /* Greeting: droopy if it was lonely, then perks up */
+  function arrive(away){
+    if (away < 300) return;
+    const lonely = S.loneliness;
+    log('came back after ' + fmt(away));
+    bump({loneliness:-45, boredom:-20, happiness:8, anxiety:-8});
+    if (away > 3*3600 && lonely > 50){
+      setOver('sad', 1800); say("…oh. you're back.", 1800);
+      setTimeout(() => setOver('surprised', 450), 1600);
+      setTimeout(() => { setOver('happy', 3200); say(S.bond > 50 ? 'I missed you!!' : 'hi… I was lonely.', 3000); }, 2050);
+    } else if (away > 900){
+      setOver('surprised', 500);
+      setTimeout(() => { setOver('happy', 2200); say('hi hi!', 2000); }, 500);
+    }
+    S.idle = 0;
+  }
+
+  /* Mood -> eyes: every mood gets a weight, presets are blended by weight */
+  function computeWeights(){
+    const s = S, w = {};
+    if (sleeping) return {asleep:1};
+    w.sleepy  = u(55 - s.energy, 0, 45) * .9;
+    w.sad     = u(s.loneliness, 40, 100)*.9 + u(45 - s.happiness, 0, 45)*.6;
+    w.happy   = u(s.happiness, 55, 100) * (1 - Math.min(1, w.sad)) * (1 - w.sleepy*.6);
+    w.bored   = u(s.boredom, 50, 100) * .9;
+    w.curious = u(s.curiosity, 60, 100) * .7;
+    w.shy     = u(s.anxiety, 35, 85) * .8;
+    w.sulk    = u(s.sulk, 5, 60) * .9;
+    return w;
+  }
+  function applyMood(){
+    weights = computeWeights();
+    let total = 0, top = 'neutral', best = .05;
+    for (const k in weights){ total += weights[k]; if (weights[k] > best){ best = weights[k]; top = k; } }
+    const out = Object.assign({}, DEF), den = Math.max(1, total);
+    for (const k in weights){
+      const p = PRESETS[k], w = weights[k];
+      for (const id in p) if (id in DEF) out[id] += w * (p[id] - DEF[id]) / den * TUNE.expr;   // mild mood = mild face
+    }
+    base = out; currentName = top;
+    blinkMul = (1.3 - S.anxiety/100*.6) * (S.energy < 30 ? 1.2 : 1);   // nervous = blinks more
+  }
+  const describe = () => {
+    const names = Object.keys(weights).filter(k => weights[k] > .15).sort((a,b) => weights[b] - weights[a]).slice(0,2);
+    return names.length ? names.map(n => WORDS[n]).join(' + ') : 'calm';
+  };
+
+  /* Self-started behaviour: only when nothing else is going on */
+  function director(){
+    if (busy || (over && performance.now() < overUntil)) return;   // never interrupt a conversation
+    const i = S.idle;
+    if (!sleeping && S.energy < 16 && i > 45){ sleeping = true; say('zzz…', 2000); return; }
+    if (sleeping) return;
+    if (S.energy < 40 && simT > cd.yawn && Math.random() < .25){
+      cd.yawn = simT + cdv(60, 150); setOver('yawn', 1800); say('*yaaawn*', 1800); return;
+    }
+    if (S.boredom > 65 && i > 20 && S.energy > 30 && simT > cd.play){        // plays alone
+      cd.play = simT + cdv(120, 240);
+      for (let k = 0; k < 7; k++) gazeQueue.push({x:(k%2 ? 1 : -1)*rnd(.5,.95), y:rnd(-.6,.6), hold:rnd(.18,.32), k:650, z:1});
+      nextGaze = 0; setOver('happy', 2600); bump({boredom:-35, happiness:6, energy:-3});
+      say(pick(['*chasing a dust bunny*','zoom zoom!',"you can't catch me!"]), 2400); return;
+    }
+    if (S.curiosity > 70 && i > 25 && simT > cd.ask){                         // asks something
+      cd.ask = simT + cdv(200, 400); bump({curiosity:-30}); setOver('curious', 3500);
+      say(pick(['what do you dream about?','what is outside the window?','do you ever get bored too?','where did you go today?']), 4500); return;
+    }
+    if (S.loneliness > 75 && i > 120 && simT > cd.call){
+      cd.call = simT + cdv(300, 600); setOver('sad', 2500); say('…hello?', 2500);
+    }
+  }
+
+  /* Slow clock: once per real second (dt is scaled by the debug speed) */
+  function tick(dt){
+    simT += dt; S.idle += dt;
+    const B = baseline(), i = S.idle;
+    const rising = {loneliness:i > 120, boredom:i > 60, curiosity:i > 90};   // grow while ignored
+    for (const k of STATS){ if (!rising[k]) S[k] += (B[k] - S[k]) * Math.min(1, dt / (k === 'energy' ? 1200 : 2400)); }
+    if (rising.loneliness) S.loneliness += dt*100/21600*TUNE.lonely;                       // ~6h to fully lonely
+    if (rising.boredom)    S.boredom    += dt*100/2400*TUNE.bored;
+    if (rising.curiosity)  S.curiosity  += dt*100/3000*TUNE.curious;
+    if (S.loneliness > 60){ S.happiness -= dt*.012; S.anxiety += dt*.004; }
+    if (i > 3600) S.affection -= dt*.0006*(1 - PERSONALITY.loyal*.7);
+    if (i > 600) S.chatStreak = 0;
+    S.sulk = Math.max(0, S.sulk - dt*.05);
+    if (sleeping && S.energy > 55){ sleeping = false; setOver('happy', 2000); say('*stretch* …morning!', 2500); }
+    STATS.forEach(k => S[k] = clamp(S[k], 0, 100));
+    director();
+  }
+  function save(){ S.lastSeen = Date.now(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }
+
+  /* Called every animation frame from the main loop */
+  function frame(dt, petting){
+    if (petting){                                   // continuous reward while being petted
+      S.happiness += 1.5*dt; S.affection += .8*dt; S.loneliness -= 3*dt; S.anxiety -= 1.5*dt;
+      S.boredom -= dt; S.sulk -= 2*dt; S.bond += .03*dt; S.idle = 0; S.petSec += dt;
+      if (S.petSec > 8){ S.petSec = 0; log('petted me'); }
+    }
+    acc += dt; wAcc += dt; saveAcc += dt; uiAcc += dt;
+    if (acc >= 1){ tick(acc * tscale); acc = 0; }
+    if (wAcc >= .25){ wAcc = 0; if (auto) applyMood(); }
+    if (saveAcc >= 5){ saveAcc = 0; save(); }
+    if (uiAcc >= .5){ uiAcc = 0; if (panel.classList.contains('on')) refreshUI(); }
+  }
+
+  /* Debug UI: live meters + event buttons */
+  function buildUI(){
+    const wrap = h('div'), bars = {}, moodEl = h('div', {className:'mood'});
+    wrap.append(moodEl);
+    STATS.concat('bond').forEach(k => {
+      const bar = h('i'), val = h('output');
+      bars[k] = {bar, val};
+      wrap.append(h('div', {className:'row'}, [h('label', {textContent:k}), h('div', {className:'bar'}, [bar]), val]));
+    });
+    const btn = (text, fn) => h('button', {textContent:text, onclick:fn});
+    const saveTune = () => { try { localStorage.setItem(TUNE_KEY, JSON.stringify({tune:TUNE, pers:PERSONALITY})); } catch(e){} };
+    const slider = (label, obj, key, min, max) => {
+      const out = h('output', {textContent:(+obj[key]).toFixed(2)});
+      const inp = h('input', {type:'range', min, max, step:(max - min)/100, value:obj[key],
+        oninput(){ obj[key] = +inp.value; out.textContent = (+inp.value).toFixed(2); saveTune(); }});
+      return h('div', {className:'row'}, [h('label', {textContent:label}), inp, out]);
+    };
+    wrap.append(h('div', {className:'mood', textContent:'— personality & tuning (saved) —'}),
+      slider('playful', PERSONALITY, 'playful', 0, 1), slider('shy', PERSONALITY, 'shy', 0, 1), slider('loyal', PERSONALITY, 'loyal', 0, 1),
+      slider('lonely speed ×', TUNE, 'lonely', 0, 4), slider('boredom speed ×', TUNE, 'bored', 0, 4),
+      slider('curiosity speed ×', TUNE, 'curious', 0, 4), slider('event impact ×', TUNE, 'events', 0, 3),
+      slider('face strength ×', TUNE, 'expr', .3, 2), slider('talkative ×', TUNE, 'chatty', .3, 3),
+      slider('energy offset', TUNE, 'energyOff', -30, 30),
+      h('div', {className:'tools'}, [
+        btn('Copy tuning', () => { const t = JSON.stringify({tune:TUNE, pers:PERSONALITY});
+          (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).catch(() => prompt('Copy:', t)); }),
+        btn('Reset tuning', () => { Object.assign(TUNE, TUNE0); Object.assign(PERSONALITY, P0); saveTune(); location.reload(); })]));
+    const speedB = btn('Speed ×1', () => { tscale = tscale === 1 ? 60 : tscale === 60 ? 600 : 1; speedB.textContent = 'Speed ×' + tscale; });
+    const timeB = btn('Time: real', () => { hourMode = (hourMode + 1) % 3; timeB.textContent = ['Time: real','Time: night','Time: day'][hourMode]; });
+    autoBox = h('input', {type:'checkbox', checked:true, onchange(){ auto = autoBox.checked; }});
+    wrap.append(h('div', {className:'btns'}, [
+      btn('Praise', () => event('praise')), btn('Scold', () => event('scold')),
+      btn('Sad news', () => event('sad')), btn('Chat turn', () => event('chat')),
+      btn('Away 6h', () => { applyAway(6*3600); arrive(6*3600); }), speedB, timeB,
+      btn('Reset', () => { try { localStorage.removeItem(KEY); } catch(e){} S = fresh(); sleeping = false; say('…who are you?', 2500); }),
+    ]), h('label', {style:'display:block;color:#9ab;font-size:12px;margin-bottom:8px'}, [autoBox, ' auto mood (off = manual sliders/presets)']));
+    refreshUI = () => {
+      STATS.concat('bond').forEach(k => { bars[k].bar.style.transform = `scaleX(${S[k]/100})`; bars[k].val.textContent = Math.round(S[k]); });
+      const bi = BOND_AT.filter(b => S.bond >= b).length - 1;
+      moodEl.textContent = `feels: ${describe()} · bond: ${BOND_NAMES[bi]} · hour ${hour()}${sleeping ? ' · ASLEEP' : ''}`;
+      if (auto && sliders.open) syncUI();      // sliders are built after this UI, skip until they exist
+    };
+    refreshUI();
+    return wrap;
+  }
+
+  /* Boot: load memory, catch up on time away, greet */
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (raw){
+      S = Object.assign(fresh(), JSON.parse(raw));
+      const away = (Date.now() - S.lastSeen) / 1000;
+      if (away > 300) applyAway(away);
+      setTimeout(() => arrive(away), 1400);
+    } else setTimeout(() => { say('…hello? is someone there?', 3500); setOver('curious', 3000); }, 1400);
+  } catch(e){}
+  applyMood();
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) save();
+    else { const away = (Date.now() - S.lastSeen) / 1000; if (away > 300){ applyAway(away); arrive(away); } }
+  });
+  addEventListener('pagehide', save);
+
+  return {frame, touch, event, buildUI, describe, say, nudge, onSay:null, hour, bump, log,
+          get state(){ return S; }, get sleeping(){ return sleeping; }, setBusy(b){ busy = b; },
+          bondName(){ return BOND_NAMES[BOND_AT.filter(b => S.bond >= b).length - 1]; },
+          setManual(){ auto = false; if (autoBox) autoBox.checked = false; }};
+})();
+window.BLIP = ENGINE;      // handle for Stage 3 (AI brain): BLIP.state, BLIP.event('chat')
+
+/* ================================================================
+   9. AI BRAIN (Stage 3) – Gemini + voice. The reply carries an emotion
+   per sentence; the engine is nudged, and the face only *reacts* to it.
+   ================================================================ */
+const BRAIN = (() => {
+  const CFG_KEY = 'blip.cfg.v3', HIST_KEY = 'blip.hist.v3';
+  const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) || d; } catch(e){ return d; } };
+  const cfg = Object.assign({key:'', model:'gemini-3.6-flash', name:'Ronnie', voice:true, lang:'en-US', engine:'gemini', ttsModel:'gemini-3.1-flash-tts-preview', voiceName:'Puck'}, load(CFG_KEY, {}));
+  const FACT_KEY = 'blip.facts.v5';
+  let facts = load(FACT_KEY, []);                      // long-term things BLIP knows about you
+  let hist = load(HIST_KEY, []);                       // [{role, parts:[{text}]}] – short chat memory
+  const store = () => { try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); localStorage.setItem(HIST_KEY, JSON.stringify(hist.slice(-12))); } catch(e){} };
+  const EMO_PRESET = {happy:'happy', love:'love', sad:'sad', angry:'angry', scared:'shy', embarrassed:'shy',
+                      playful:'laugh', curious:'curious', sleepy:'sleepy', surprised:'surprised', neutral:'neutral'};
+  const PITCH = {happy:.2, playful:.25, love:.1, sad:-.3, sleepy:-.3, angry:-.15, scared:.2, surprised:.3};
+  let busy = false, listening = false, convo = false, rec = null, got = false;
+  let statusEl, micB, txtRow, txtIn;
+  const status = m => { if (statusEl) statusEl.textContent = m; };
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  /* A preset scaled toward neutral: intensity 0.3 = subtle, 1 = full */
+  function scaledPreset(name, k){
+    const p = fullPreset(name), out = {};
+    for (const id in DEF) out[id] = DEF[id] + (p[id] - DEF[id]) * k;
+    return out;
+  }
+
+  /* System prompt rebuilt on EVERY turn from the live inner state */
+  function systemPrompt(){
+    const S = ENGINE.state, n = cfg.name, why = [], hr = ENGINE.hour();
+    if (S.loneliness > 60) why.push(`lonely and a bit sulky because ${n} was away or ignored you for a long time`);
+    if (S.sulk > 20)       why.push(`hurt and sulky because ${n} was harsh with you`);
+    if (S.energy < 35)     why.push(hr >= 23 || hr < 6 ? 'very sleepy, it is night' : 'tired and low on energy');
+    if (S.boredom > 60)    why.push('bored and wanting to play');
+    if (S.curiosity > 70)  why.push('very curious, full of questions');
+    if (S.anxiety > 55)    why.push('nervous and on edge');
+    if (S.happiness > 70)  why.push('happy and warm');
+    if (S.affection > 70)  why.push(`very affectionate toward ${n}`);
+    const events = S.log.map(e => `- ${Math.round((Date.now() - e.t)/60000)} min ago: ${n} ${e.what}`).join('\n') || '- nothing special lately';
+    return `You are BLIP, a small living creature with glowing eyes who lives in ${n}'s phone. You are NOT an assistant and never talk like one: no offering help, no lists, no explanations, no "as an AI". You have your own moods and you say how you feel.
+Personality: playful, a little shy, very loyal.
+Right now you feel: ${ENGINE.describe()}. ${why.length ? 'You feel ' + why.join('; ') + '.' : 'You feel calm.'}
+Stats (0-100): energy ${Math.round(S.energy)}, happiness ${Math.round(S.happiness)}, loneliness ${Math.round(S.loneliness)}, boredom ${Math.round(S.boredom)}, anxiety ${Math.round(S.anxiety)}.
+Your bond with ${n}: ${ENGINE.bondName()} (${Math.round(S.bond)}/100). The lower the bond, the more shy and guarded you are.
+Local time: ${hr}:00.
+Things you know about ${n} (use them naturally, sometimes bring one up on your own):
+${facts.map(f => '- ' + f).join('\n') || '- nothing yet, you are still getting to know them'}
+Recent events:
+${events}
+Speak in short, natural sentences, 1-3 sentences total, like a pet-sized friend. Let your mood colour your words (sulky, sleepy, giddy...). Reply in the language ${n} speaks. No emojis, no markdown.
+Reply ONLY with JSON: {"lines":[{"text":"...","emotion":"...","intensity":0.0-1.0}],"user":"...","remember":["..."]}
+One line per sentence (max 3). emotion is one of: happy, love, sad, angry, scared, embarrassed, playful, curious, sleepy, surprised, neutral.
+"user" is how ${n}'s last message treated you: "praise", "scold", "sad" (they shared bad news) or "none".
+"remember" is optional: up to 2 short new facts about ${n} that they just told you (people, likes, plans, habits). Only real facts they said, never guesses.`;
+  }
+
+  async function ask(text){
+    hist.push({role:'user', parts:[{text}]});
+    const contents = hist.slice(-12);
+    while (contents.length && contents[0].role !== 'user') contents.shift();
+    /* Gemini 3 "thinks" at high level by default = slow. Ask for minimal thinking; if this model
+       rejects that, fall back to the 2.5-style budget, then to nothing (remembered in cfg.think). */
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.model)}:generateContent`;
+    const tries = cfg.think === undefined ? [{thinkingLevel:'minimal'}, {thinkingBudget:0}, null] : [cfg.think];
+    let res, data;
+    for (const th of tries){
+      const gc = {responseMimeType:'application/json', maxOutputTokens:1024};
+      if (th) gc.thinkingConfig = th;
+      res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json', 'x-goog-api-key':cfg.key},
+        body:JSON.stringify({systemInstruction:{parts:[{text:systemPrompt()}]}, contents, generationConfig:gc})});
+      data = await res.json().catch(() => ({}));
+      if (res.ok){ cfg.think = th; break; }
+      if (res.status !== 400 || !/think/i.test(JSON.stringify(data))) break;     // only retry on thinking-config errors
+    }
+    if (!res.ok){ hist.pop(); throw new Error((data.error && data.error.message) || 'HTTP ' + res.status); }
+    const raw = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+    const txt = raw.map(p => p.text || '').join('').replace(/^\s*```(?:json)?|```\s*$/g, '').trim();
+    let j; try { j = JSON.parse(txt); } catch(e){ j = {lines:[{text:txt || '…', emotion:'neutral', intensity:.5}]}; }
+    j.lines = (Array.isArray(j.lines) ? j.lines : []).filter(l => l && l.text).slice(0, 3);
+    if (!j.lines.length) j.lines = [{text:'…', emotion:'neutral', intensity:.3}];
+    if (Array.isArray(j.remember)){                       // save new facts about the user
+      for (const f of j.remember) if (typeof f === 'string' && f.length < 140 && !facts.includes(f.trim())) facts.push(f.trim());
+      facts = facts.slice(-30); try { localStorage.setItem(FACT_KEY, JSON.stringify(facts)); } catch(e){}
+    }
+    hist.push({role:'model', parts:[{text:j.lines.map(l => l.text).join(' ')}]}); store();
+    return j;
+  }
+
+  /* ---- Voice out: Gemini TTS (natural, emotional) with the phone voice as fallback ---- */
+  let actx = null;
+  const unlock = () => { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); } catch(e){} };
+  addEventListener('pointerdown', unlock); addEventListener('keydown', unlock);   // browsers need a gesture to allow audio
+  const STYLE = {happy:'cheerfully and brightly', playful:'playfully, a little giggly', sad:'softly and sadly', sleepy:'sleepily, slow and quiet',
+    angry:'grumpily, pouting', scared:'nervously, hesitant', embarrassed:'shyly, a bit flustered', love:'warmly and tenderly',
+    curious:'curiously', surprised:'surprised and excited', neutral:'in a gentle, cute way'};
+  async function ttsFetch(text, emo){
+    unlock();
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(cfg.ttsModel)}:generateContent`, {
+      method:'POST', headers:{'Content-Type':'application/json', 'x-goog-api-key':cfg.key},
+      body:JSON.stringify({contents:[{parts:[{text:`Say in a tiny, cute creature voice, ${STYLE[emo] || STYLE.neutral}: ${text.replace(/\*/g, '')}`}]}],
+        generationConfig:{responseModalities:['AUDIO'], speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:cfg.voiceName}}}}})});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data.error && data.error.message) || 'HTTP ' + res.status);
+    const part = ((((data.candidates || [])[0] || {}).content || {}).parts || []).find(x => x.inlineData);
+    if (!part) throw new Error('no audio returned');
+    const bin = atob(part.inlineData.data), n = bin.length >> 1, f = new Float32Array(n);   // 16-bit PCM -> float
+    for (let i = 0; i < n; i++){ let v = bin.charCodeAt(2*i) | (bin.charCodeAt(2*i + 1) << 8); if (v > 32767) v -= 65536; f[i] = v / 32768; }
+    const rate = +((/rate=(\d+)/.exec(part.inlineData.mimeType || '') || [])[1]) || 24000;
+    const buf = actx.createBuffer(1, n, rate); buf.copyToChannel(f, 0); return buf;
+  }
+  const playBuf = buf => new Promise(done => {
+    const src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
+    src.onended = done; src.start(); setTimeout(done, buf.duration*1000 + 1500);
+  });
+  function phoneSay(text, emo, end){
+    const u = new SpeechSynthesisUtterance(text.replace(/\*/g, ''));
+    const v = speechSynthesis.getVoices().find(v => v.lang.startsWith(cfg.lang.slice(0, 2)) && /google|natural|neural/i.test(v.name));
+    if (v) u.voice = v;
+    u.lang = cfg.lang; u.pitch = clamp(1.4 + (PITCH[emo] || 0), .5, 2); u.rate = emo === 'sleepy' ? .85 : 1.05;
+    u.onend = u.onerror = end; speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }
+
+  /* Say one sentence: caption + voice (or a timer if voice is off) while the eyes pulse */
+  async function speak(text, emo, audioP){
+    const buf = audioP ? await audioP : null;             // audio was requested in parallel for all lines
+    talkTarget = 1;
+    const ms = Math.max(1800, text.length*90 + 800);
+    ENGINE.say(text, ms + 1500, true);
+    if (buf){ await playBuf(buf); talkTarget = 0; return; }
+    return new Promise(done => {
+      let fin = false; const end = () => { if (!fin){ fin = true; talkTarget = 0; done(); } };
+      if (cfg.voice && 'speechSynthesis' in window){ phoneSay(text, emo, end); setTimeout(end, ms + 4000); }   // safety: Android drops onend sometimes
+      else setTimeout(end, ms);
+    });
+  }
+
+  async function perform(j){
+    const audio = cfg.voice && cfg.engine === 'gemini'
+      ? j.lines.map(L => ttsFetch(L.text, EMO_PRESET[L.emotion] ? L.emotion : 'neutral').catch(e => { status('voice error: ' + e.message); return null; })) : [];
+    if (['praise','scold','sad'].includes(j.user)) ENGINE.event(j.user, true);   // stats only; the reply supplies face + words
+    for (let i = 0; i < j.lines.length; i++){
+      const L = j.lines[i], emo = EMO_PRESET[L.emotion] ? L.emotion : 'neutral', k = clamp(+L.intensity || .5, 0, 1);
+      ENGINE.nudge(emo, k * (i ? .6 : 1));                                          // nudge the engine...
+      over = scaledPreset(EMO_PRESET[emo], .4 + .6*k); overUntil = Infinity;        // ...and react to this sentence
+      await speak(L.text, emo, audio[i]);
+      await new Promise(r => setTimeout(r, 250));
+    }
+    ENGINE.event('chat', true);                          // conversation tires it a little
+    overUntil = performance.now() + 600;
+  }
+
+  async function send(text){
+    text = (text || '').trim(); if (!text || busy) return;
+    if (!cfg.key){ ENGINE.say('I need a Gemini key… (⚙)', 4000, true); panel.classList.add('on'); return; }
+    busy = true; ENGINE.setBusy(true); ENGINE.touch();
+    over = fullPreset('curious'); overUntil = Infinity;              // "thinking" look
+    status('thinking…');
+    try { const t0 = performance.now(); const r = await ask(text);
+          status('reply in ' + ((performance.now() - t0)/1000).toFixed(1) + 's'); await perform(r); }
+    catch(e){ status('error: ' + e.message); ENGINE.say('…my head hurts. (' + String(e.message).slice(0, 60) + ')', 5000, true); overUntil = 0; talkTarget = 0; }
+    busy = false; ENGINE.setBusy(false);
+    if (convo) setTimeout(listen, 500);
+  }
+
+  /* Voice in (Web Speech API). Mic = conversation mode: it listens again after each answer */
+  function listen(){
+    if (!SR){ status('no speech recognition here – use the keyboard'); convo = false; return; }
+    if (busy || listening) return;
+    rec = new SR(); rec.lang = cfg.lang; rec.interimResults = false; got = false;
+    rec.onstart = () => { listening = true; micB.classList.add('on'); over = fullPreset('curious'); overUntil = performance.now() + 20000; };
+    rec.onresult = e => { got = true; send(e.results[0][0].transcript); };
+    rec.onerror = e => { status('mic error: ' + e.error); if (e.error !== 'no-speech' && e.error !== 'aborted') ENGINE.say('mic: ' + e.error, 3500, true); if (e.error === 'not-allowed' || e.error === 'service-not-allowed'){ convo = false; status('microphone blocked'); } };
+    rec.onend = () => {
+      listening = false; if (!convo) micB.classList.remove('on');
+      if (!busy) overUntil = 0;
+      if (convo && !busy && !got) setTimeout(listen, 300);
+    };
+    try { rec.start(); } catch(e){}
+  }
+  function toggleMic(){
+    if (!window.isSecureContext){            // file:// and content:// pages cannot use the microphone
+      status('Voice needs https – host the file (Netlify Drop / GitHub Pages). Keyboard works.');
+      ENGINE.say('voice needs https… use ⌨ for now', 5000, true); return;
+    }
+    if (convo || listening){ convo = false; micB.classList.remove('on'); try { rec.abort(); } catch(e){} }
+    else { convo = true; micB.classList.add('on'); listen(); }
+  }
+
+  /* On-screen controls + settings in the debug panel */
+  function buildUI(){
+    micB = h('button', {id:'mic', textContent:'🎤', onclick:toggleMic});
+    txtIn = h('input', {id:'txt', type:'text', placeholder:'say something…', enterKeyHint:'send',
+      onkeydown(e){ if (e.key === 'Enter'){ send(txtIn.value); txtIn.value = ''; } }});
+    txtRow = h('div', {id:'txtRow'}, [txtIn]);
+    document.body.append(micB, h('button', {id:'kb', textContent:'⌨', onclick(){ txtRow.classList.toggle('on'); if (txtRow.classList.contains('on')) txtIn.focus(); }}), txtRow);
+
+    const wrap = h('div'); statusEl = h('div', {className:'mood', textContent:'brain: add a key, then tap 🎤 or ⌨'});
+    const field = (label, k, type) => h('div', {className:'row'}, [h('label', {textContent:label}),
+      h('input', {type, value:cfg[k], onchange(e){ cfg[k] = e.target.value.trim(); store(); }})]);
+    const sel = h('select', {style:'flex:1;background:#16212c;color:#cfe6ff;border:1px solid #2a3a4a;border-radius:6px;padding:7px',
+      onchange(){ cfg.engine = sel.value; store(); }},
+      [h('option', {value:'gemini', textContent:'Gemini (natural)'}), h('option', {value:'phone', textContent:'Phone (robotic)'})]);
+    sel.value = cfg.engine;
+    const engineRow = h('div', {className:'row'}, [h('label', {textContent:'voice engine'}), sel]);
+    const voiceBox = h('input', {type:'checkbox', checked:cfg.voice, onchange(){ cfg.voice = voiceBox.checked; store(); }});
+    wrap.append(statusEl, field('Gemini API key', 'key', 'password'), field('model', 'model', 'text'),
+      field('your name', 'name', 'text'), field('speech language', 'lang', 'text'), engineRow,
+      field('voice name', 'voiceName', 'text'), field('voice model', 'ttsModel', 'text'),
+      h('div', {className:'tools'}, [h('label', {style:'flex:1;color:#9ab;font-size:12px'}, [voiceBox, ' voice out']),
+        h('button', {textContent:'Test: say hi', onclick(){ send('hi BLIP!'); }}),
+        h('button', {textContent:'Test voice', onclick(){ status('loading voice…');
+          ttsFetch('Hi! I am Blip, and I am so happy to see you!', 'happy').then(b => { status('playing'); talkTarget = 1; return playBuf(b); })
+            .then(() => { talkTarget = 0; }).catch(e => { talkTarget = 0; status('voice error: ' + e.message); }); }}),
+        h('button', {textContent:'Forget chat', onclick(){ hist = []; store(); status('chat memory cleared'); }})]),
+      h('div', {className:'tools'}, [
+        h('button', {textContent:'What do you know?', onclick(){ status(facts.length ? 'I know: ' + facts.join(' · ') : 'no facts yet'); }}),
+        h('button', {textContent:'Forget facts', onclick(){ facts = []; try { localStorage.removeItem(FACT_KEY); } catch(e){} status('facts forgotten'); }})]));
+    return wrap;
+  }
+
+  /* Spontaneous lines from the engine (questions, greetings) are spoken too; "*actions*" stay text only */
+  ENGINE.onSay = async text => {
+    if (!cfg.voice || busy || /^(zzz|\*)/i.test(text)) return;
+    try {
+      if (cfg.engine === 'gemini' && cfg.key){
+        const b = await ttsFetch(text, 'neutral'); if (busy) return;
+        talkTarget = 1; await playBuf(b); if (!busy) talkTarget = 0; return;
+      }
+    } catch(e){}
+    if (!('speechSynthesis' in window)) return;
+    talkTarget = 1; phoneSay(text, 'neutral', () => { if (!busy) talkTarget = 0; });
+  };
+  return {buildUI, send, cfg};
+})();
+
+/* ================================================================
+  10. PHONE SENSES + INSTALL – it notices being lifted, tilted, shaken
+      or turned upside down, and the app can be installed to the home screen.
+   ================================================================ */
+const SENSE = (() => {
+  const G = 9.81;
+  let lastMove = performance.now(), lastPush = 0, spikes = [], shakes = [], lastReact = 0;
+  let flipSince = 0, flipped = false, tilt = 0, installEv = null, installBtn = null;
+  const pick = a => a[Math.random()*a.length | 0];
+
+  function shaken(now){
+    ENGINE.touch();
+    shakes = shakes.filter(t => now - t < 30000); shakes.push(now);
+    if (shakes.length >= 3){                               // shaken again and again = it gets upset
+      ENGINE.bump({happiness:-6, anxiety:6, sulk:15}); ENGINE.state.bond = clamp(ENGINE.state.bond - 1, 0, 100);
+      ENGINE.log('shook me hard'); ENGINE.say(pick(['hey! stop shaking me!','that is not nice…']), 2600); setOver('sulk', 2600);
+    } else {                                               // one shake = funny dizzy spin
+      ENGINE.bump({energy:-1, happiness:-1});
+      for (let k = 0; k < 10; k++){ const a = k*.9; gazeQueue.push({x:Math.cos(a)*.9, y:Math.sin(a)*.7, hold:.14, k:700, z:1}); }
+      nextGaze = 0; setOver('dizzy', 2200); ENGINE.say(pick(['whoa whoa whoa…','*dizzy*','too… fast…']), 2400);
+    }
+  }
+  function onMotion(e){
+    const a = e.accelerationIncludingGravity; if (!a || a.x == null) return;
+    const now = performance.now(), dev = Math.abs(Math.hypot(a.x, a.y, a.z) - G);
+    const ang = (screen.orientation && screen.orientation.angle) || 0;            // convert to screen directions
+    const right = ang === 90 ? -a.y : ang === 270 ? a.y : ang === 180 ? -a.x : a.x;
+    const up    = ang === 90 ?  a.x : ang === 270 ? -a.x : ang === 180 ? -a.y : a.y;
+    tilt += (clamp(-right/G, -1, 1) - tilt) * .08; tiltX = tilt;                  // eyes roll toward the low side
+    if (dev > 12 && now - lastPush > 80){ lastPush = now; spikes.push(now); }       // shake = several hard spikes in 1s
+    spikes = spikes.filter(t => now - t < 1000);
+    if (spikes.length >= 4 && now - lastReact > 2500){ lastReact = now; spikes = []; shaken(now); return; }
+    if (dev > 2.5){                                                                // lifted after resting a while
+      if (now - lastMove > 30000){ ENGINE.touch(); ENGINE.log('picked me up'); }
+      lastMove = now;
+    }
+    if (up < -6){                                                                  // upside down for 1.5s
+      if (!flipSince) flipSince = now;
+      else if (!flipped && now - flipSince > 1500){ flipped = true; setOver('surprised', 2200); ENGINE.say('the world is upside down!', 2500); }
+    } else { flipSince = 0; flipped = false; }
+  }
+  if (typeof DeviceMotionEvent !== 'undefined' && DeviceMotionEvent.requestPermission)   // iOS asks first
+    addEventListener('pointerdown', () => DeviceMotionEvent.requestPermission().then(r => { if (r === 'granted') addEventListener('devicemotion', onMotion); }).catch(() => {}), {once:true});
+  else addEventListener('devicemotion', onMotion);
+
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEv = e; if (installBtn) installBtn.style.display = ''; });
+  if ('serviceWorker' in navigator && /^https?:/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
+
+  function buildUI(){
+    installBtn = h('button', {textContent:'Install app', style:'display:none', onclick(){ if (installEv) installEv.prompt(); }});
+    if (installEv) installBtn.style.display = '';
+    return h('div', {}, [h('div', {className:'mood', textContent:'phone: shake me, tilt me, flip me, lift me. Install: Chrome ⋮ menu → Install app'}),
+      h('div', {className:'tools'}, [installBtn])]);
+  }
+  return {buildUI};
+})();
+
+/* ================================================================
+  11. MAIN LOOP
+   ================================================================ */
+let last = performance.now();
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt = Math.min(.033, (now - last)/1000); last = now;
+  const t = now/1000;
+  updateTouch(now); ENGINE.frame(dt, !!(touch && touch.pet)); updateBlink(t); updateGaze(t);
+  step(dt, t, now); render(t);
+}
+requestAnimationFrame(frame);
+
+/* ================================================================
+  12. DEBUG PANEL
+   ================================================================ */
+const panel = document.getElementById('panel');
+const sliders = {};
+function h(tag, props, kids){
+  const n = Object.assign(document.createElement(tag), props || {});
+  (kids || []).forEach(k => n.append(k));
+  return n;
+}
+const btnWrap = h('div', {className:'btns'});
+const btnEls = {};
+Object.keys(PRESETS).forEach(name => {
+  btnEls[name] = h('button', {textContent:name, onclick(){
+    ENGINE.setManual(); base = fullPreset(name); currentName = name; nextBlink = Math.min(nextBlink, performance.now()/1000 + .2);
+    syncUI();
+  }});
+  btnWrap.append(btnEls[name]);
+});
+const lifeBox = h('input', {type:'checkbox', checked:true, onchange(){ life = lifeBox.checked; }});
+const tools = h('div', {className:'tools'}, [
+  h('button', {textContent:'Fullscreen', onclick(){ document.documentElement.requestFullscreen && document.documentElement.requestFullscreen().catch(()=>{}); }}),
+  h('button', {textContent:'Copy values', onclick(){
+    const out = {}; PARAMS.forEach(p => { if (Math.abs(base[p.id] - DEF[p.id]) > .001) out[p.id] = +(+base[p.id]).toFixed(2); });
+    const txt = JSON.stringify(out);
+    (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).catch(() => prompt('Copy:', txt));
+  }}),
+  h('label', {style:'flex:1;color:#9ab;font-size:12px;text-align:center'}, [lifeBox, ' idle life']),
+]);
+panel.append(BRAIN.buildUI(), SENSE.buildUI(), ENGINE.buildUI(), btnWrap, tools);
+PARAMS.forEach(p => {
+  const out = h('output');
+  const inp = h('input', {type:'range', min:p.min, max:p.max, step:(p.max-p.min)/200, value:p.def,
+    oninput(){ ENGINE.setManual(); base[p.id] = +inp.value; out.textContent = (+inp.value).toFixed(2); }});
+  sliders[p.id] = {inp, out};
+  panel.append(h('div', {className:'row'}, [h('label', {textContent:p.label}), inp, out]));
+});
+function syncUI(){
+  PARAMS.forEach(p => { sliders[p.id].inp.value = base[p.id]; sliders[p.id].out.textContent = (+base[p.id]).toFixed(2); });
+  Object.keys(btnEls).forEach(n => btnEls[n].classList.toggle('cur', n === currentName));
+}
+syncUI();
+document.getElementById('gear').addEventListener('click', () => panel.classList.toggle('on'));
+})();
+</script>
+</body>
+</html>
